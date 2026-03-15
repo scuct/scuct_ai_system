@@ -212,9 +212,11 @@ def _infer_edit_targets(user_text: str) -> set[str]:
         targets.add("items")
     if any(k in text for k in ["日期", "date"]):
         targets.add("date")
-    if any(k in text for k in ["賣方統編", "店家統編", "vendor"]):
+    if any(k in text for k in ["賣方統編", "店家統編", "vendor"]) or ("賣方" in text and "統編" in text):
         targets.add("vendor_tax_id")
-    if any(k in text for k in ["買方統編", "統編", "buyer"]):
+    if any(k in text for k in ["買方統編", "buyer"]) or ("買方" in text and "統編" in text):
+        targets.add("buyer_tax_id")
+    if "統編" in text and "賣方" not in text and "買方" not in text:
         targets.add("buyer_tax_id")
     if any(k in text for k in ["發票", "收據", "invoice_type", "類型"]):
         targets.add("invoice_type")
@@ -349,6 +351,7 @@ def extract_invoice_data(image_bytes: bytes) -> InvoiceData:
     2. vendor_tax_id and buyer_tax_id should be 8-digit strings; use "" if missing.
     3. amount should be an integer total.
     4. items should list item name and price.
+    4.1 invoice_type should be one of: 發票, 收據, 空白收據, 其他.
     5. Pay special attention to labels "買方" and "賣方". The target tax ID is usually right after these labels.
     6. For this system, buyer_tax_id is expected to be {target_buyer}. If this number appears near/after "買方", extract it as buyer_tax_id.
     7. Do not swap vendor and buyer IDs: vendor_tax_id should map to "賣方", buyer_tax_id should map to "買方".
@@ -464,18 +467,24 @@ def _apply_user_edit_fallback(current_data: dict, user_text: str) -> InvoiceData
     if amount_match:
         updated["amount"] = int(amount_match.group(2))
 
-    if any(k in text for k in ["賣方統編", "店家統編", "vendor"]):
+    if any(k in text for k in ["賣方統編", "店家統編", "vendor"]) or ("賣方" in text and "統編" in text):
         m = re.search(r"(\d{8})", text)
         if m:
             updated["vendor_tax_id"] = m.group(1)
 
-    if any(k in text for k in ["買方統編", "統編", "buyer"]):
+    if any(k in text for k in ["買方統編", "buyer"]) or ("買方" in text and "統編" in text):
+        m = re.search(r"(\d{8})", text)
+        if m:
+            updated["buyer_tax_id"] = m.group(1)
+    elif "統編" in text and "賣方" not in text:
         m = re.search(r"(\d{8})", text)
         if m:
             updated["buyer_tax_id"] = m.group(1)
 
-    if any(k in text for k in ["收據", "發票", "invoice_type", "類型"]):
-        if "電子發票" in text or "發票" in text:
+    if any(k in text for k in ["空白收據", "收據", "發票", "invoice_type", "類型"]):
+        if "空白收據" in text:
+            updated["invoice_type"] = "空白收據"
+        elif "電子發票" in text or "發票" in text:
             updated["invoice_type"] = "發票"
         elif "收據" in text:
             updated["invoice_type"] = "收據"

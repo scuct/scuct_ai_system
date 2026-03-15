@@ -16,10 +16,10 @@ from core.schemas import InvoiceData
 app = FastAPI(title="Bartending Club Finance Agent")
 handler = WebhookHandler(config.LINE_CHANNEL_SECRET)
 
-CONFIRM_TOKENS = {"確認", "确认", "confirm", "ok", "yes", "蝣箄?"}
-EDIT_TOKENS = {"修改", "更正", "edit", "fix", "靽格迤"}
-CANCEL_TOKENS = {"取消", "cancel", "reset", "??"}
-SKIP_TOKENS = {"略過", "跳過", "skip", "?仿?"}
+CONFIRM_TOKENS = {"確認", "确认", "confirm", "ok", "yes"}
+EDIT_TOKENS = {"修改", "更正", "edit", "fix"}
+CANCEL_TOKENS = {"取消", "cancel", "reset"}
+SKIP_TOKENS = {"略過", "跳過", "skip"}
 BOOKKEEP_TOKENS = {"記帳", "記賬", "手動記帳", "manual"}
 
 # Global service instances
@@ -124,12 +124,17 @@ def _preserve_meta_fields(old_data: dict, new_invoice: InvoiceData) -> dict:
 
 
 def _looks_like_invoice_data(invoice_data: InvoiceData) -> bool:
+    def _valid_tax_id(value: str) -> bool:
+        return isinstance(value, str) and value.isdigit() and len(value) == 8
+
     has_amount = (invoice_data.amount or 0) > 0
-    has_items = len(invoice_data.items or []) > 0
-    has_vendor = bool((invoice_data.vendor_tax_id or "").strip())
+    has_items = any(bool((item.name or "").strip()) for item in (invoice_data.items or []))
+    has_vendor = _valid_tax_id((invoice_data.vendor_tax_id or "").strip())
+    has_buyer = _valid_tax_id((invoice_data.buyer_tax_id or "").strip())
     has_date = bool((invoice_data.date or "").strip()) and invoice_data.date != "1970-01-01"
-    has_type = invoice_data.invoice_type in {"發票", "收據"}
-    return has_type or has_amount or has_items or has_vendor or has_date
+    signal_count = sum([has_amount, has_items, has_vendor, has_buyer, has_date])
+    # Require at least two concrete signals so a default invoice_type alone is not enough.
+    return signal_count >= 2
 
 
 def _eligibility_text(eligibility: int) -> str:
@@ -149,7 +154,7 @@ def _reply_edit_guide(line_service: LineService, reply_token: str):
         "2) 金額改 580\n"
         "3) 賣方統編改 12345678\n"
         "4) 類型改收據\n"
-        "5) 類別改日常開銷、設備購置、社課開銷、活動開銷"
+        "5) 類別改日常開銷與練習、長期硬體設備購置、社課開銷、活動開銷"
     )
     line_service.reply_text(reply_token, msg)
 
@@ -312,6 +317,12 @@ def handle_text_message(event: MessageEvent):
             return
 
         if _is_manual_mode(temp_data):
+            if _is_token(text, CONFIRM_TOKENS):
+                state_manager.set_state(user_id, AppState.WAITING_FOR_CONFIRM, temp_data)
+                flex = line_service.build_manual_record_flex(temp_data)
+                line_service.reply_flex(reply_token, "以下是目前手動記帳資料，請確認", flex)
+                return
+
             if _is_token(text, SKIP_TOKENS):
                 state_manager.set_state(user_id, AppState.WAITING_FOR_CONFIRM, temp_data)
                 flex = line_service.build_manual_record_flex(temp_data)
@@ -319,6 +330,12 @@ def handle_text_message(event: MessageEvent):
                 return
 
             _apply_manual_parse_and_reply(user_id, reply_token, text)
+            return
+
+        if _is_token(text, CONFIRM_TOKENS):
+            state_manager.set_state(user_id, AppState.WAITING_FOR_CONFIRM, temp_data)
+            flex_message = line_service.build_confirmation_flex(temp_data)
+            line_service.reply_flex(reply_token, "以下是目前資料，請確認", flex_message)
             return
 
         if _is_token(text, SKIP_TOKENS):

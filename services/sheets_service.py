@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -63,20 +64,28 @@ class SheetsService:
         self.client = get_gspread_client()
         self.doc = self.client.open_by_key(config.GOOGLE_SHEET_ID)
 
-        self._ensure_sheets_exist(["Invoices", "Subsidies", "States", "Log"])
-
-        self.invoices_sheet = self.doc.worksheet("Invoices")
-        self.subsidies_sheet = self.doc.worksheet("Subsidies")
-        self.states_sheet = self.doc.worksheet("States")
-        self.log_sheet = self.doc.worksheet("Log")
+        self.invoices_sheet = self._get_or_create_sheet(["Invoices"], "Invoices")
+        self.subsidies_sheet = self._get_or_create_sheet(["Subsidies", "Subsides", "subsides"], "Subsidies")
+        self.states_sheet = self._get_or_create_sheet(["States"], "States")
+        self.log_sheet = self._get_or_create_sheet(["Log"], "Log")
 
         self._init_headers()
 
-    def _ensure_sheets_exist(self, sheet_names):
-        existing = [ws.title for ws in self.doc.worksheets()]
-        for name in sheet_names:
-            if name not in existing:
-                self.doc.add_worksheet(title=name, rows=1000, cols=30)
+    def _normalize_sheet_title(self, title: str) -> str:
+        return str(title).replace(" ", "").replace("_", "").replace("-", "").strip().lower()
+
+    def _find_sheet_by_aliases(self, aliases: list[str]):
+        normalized_aliases = {self._normalize_sheet_title(a) for a in aliases}
+        for ws in self.doc.worksheets():
+            if self._normalize_sheet_title(ws.title) in normalized_aliases:
+                return ws
+        return None
+
+    def _get_or_create_sheet(self, aliases: list[str], create_title: str):
+        ws = self._find_sheet_by_aliases(aliases)
+        if ws:
+            return ws
+        return self.doc.add_worksheet(title=create_title, rows=1000, cols=30)
 
     def _init_headers(self):
         invoice_header_row = self.invoices_sheet.row_values(1)
@@ -129,6 +138,10 @@ class SheetsService:
     def _is_valid_tax_id(self, value: str) -> bool:
         return isinstance(value, str) and value.isdigit() and len(value) == 8
 
+    def _is_blank_receipt_type(self, invoice_type: str) -> bool:
+        t = str(invoice_type or "").strip()
+        return t in {"空白收據", "空白 收據", "空白", "白單"}
+
     def _is_data_complete(self, data: InvoiceData, require_tax_ids: bool = True) -> bool:
         if not data.date or data.date == "1970-01-01":
             return False
@@ -160,7 +173,7 @@ class SheetsService:
         - 空白收據：可免統編核銷
         """
         invoice_type = str(data.invoice_type or "").strip()
-        is_blank_receipt = invoice_type == "空白收據"
+        is_blank_receipt = self._is_blank_receipt_type(invoice_type)
 
         if not self._is_data_complete(data, require_tax_ids=not is_blank_receipt):
             return 0
@@ -188,7 +201,7 @@ class SheetsService:
         reconciliation_status = 0
 
         if eligibility in (1, 2):
-            matched_activity = self._greedy_match(data.date)
+            matched_activity = self._greedy_match(data.date, int(data.amount))
             if matched_activity:
                 matched_activity_id = matched_activity["activity_id"]
                 reconciliation_status = 1
@@ -278,14 +291,55 @@ class SheetsService:
         }
 
     def _parse_date(self, value: str) -> Optional[datetime]:
+        if value is None:
+            return None
+
+        if isinstance(value, datetime):
+            return datetime(value.year, value.month, value.day)
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        normalized = (
+            text.replace("年", "-")
+            .replace("月", "-")
+            .replace("日", "")
+            .replace(".", "-")
+            .replace("/", "-")
+        )
+        normalized = re.sub(r"\s+", " ", normalized)
+
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(normalized, fmt)
+                return datetime(dt.year, dt.month, dt.day)
+            except Exception:
+                pass
+
         try:
-            return datetime.strptime(str(value), "%Y-%m-%d")
+            iso_text = text.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso_text)
+            return datetime(dt.year, dt.month, dt.day)
+        except Exception:
+            pass
+
+        m = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", text)
+        if not m:
+            return None
+
+        y, mo, d = m.groups()
+        try:
+            return datetime(int(y), int(mo), int(d))
         except Exception:
             return None
 
     def _to_float(self, value, default: float = 0.0) -> float:
         try:
-            return float(value)
+            text = str(value).replace(",", "").strip()
+            if text == "":
+                return default
+            return float(text)
         except Exception:
             return default
 
@@ -305,9 +359,33 @@ class SheetsService:
                 return v
         return ""
 
-    def _greedy_match(self, invoice_date_str: str) -> Optional[dict]:
+    def _normalize_activity_id(self, value) -> str:
+        if value is None:
+            return ""
+
+        if isinstance(value, (int, float)):
+            v = float(value)
+            if v.is_integer():
+                return str(int(v))
+            return str(v)
+
+        text = str(value).strip()
+        if not text:
+            return ""
+
+        m = re.fullmatch(r"(\d+)\.0+", text)
+        if m:
+            return m.group(1)
+
+        return text
+
+    def _greedy_match(self, invoice_date_str: str, invoice_amount: int) -> Optional[dict]:
         invoice_date = self._parse_date(invoice_date_str)
         if not invoice_date:
+            return None
+
+        invoice_amount = max(0, int(invoice_amount or 0))
+        if invoice_amount <= 0:
             return None
 
         records = self.subsidies_sheet.get_all_records()
@@ -315,7 +393,7 @@ class SheetsService:
 
         for idx, row in enumerate(records):
             row_idx = idx + 2
-            activity_id = str(self._row_get(row, "活動ID", "活動 Id", "活動id")).strip()
+            activity_id = self._normalize_activity_id(self._row_get(row, "活動ID", "活動 Id", "活動id"))
             activity_date_str = str(self._row_get(row, "活動日期", "活動 日期")).strip()
             activity_date = self._parse_date(activity_date_str)
             start_date = self._parse_date(str(self._row_get(row, "起始計算日", "起始 計算日")).strip())
@@ -330,6 +408,9 @@ class SheetsService:
             if subsidy_amount <= 0:
                 continue
             if gap <= 0:
+                continue
+            # Only match activities that still have enough gap for this invoice amount.
+            if gap < float(invoice_amount):
                 continue
             # Prefer matching by configured accounting window when present.
             if start_date and invoice_date < start_date:
@@ -351,8 +432,8 @@ class SheetsService:
         if not candidates:
             return None
 
-        # Greedy: prioritize earliest activity date among valid candidates.
-        candidates.sort(key=lambda x: x["activity_date"])
+        # Greedy: prioritize earliest activity date, then smallest sufficient gap.
+        candidates.sort(key=lambda x: (x["activity_date"], x["gap"]))
         return candidates[0]
 
     def _update_subsidy_amounts(
