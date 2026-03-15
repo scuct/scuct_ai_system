@@ -1,0 +1,28 @@
+﻿services:
+  - type: web
+    name: scuct-ai-linebot
+    env: python
+    plan: starter
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: BUYER_TAX_ID
+        value: "29902605"
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: LIFF_ID
+        sync: false

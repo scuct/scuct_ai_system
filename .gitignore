@@ -1,0 +1,39 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Test / tool cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local runtime artifacts
+*.log
+debug_error.log
+models_debug.json
+results.txt
+
+# Build
+build/
+dist/
+
+# User-requested ignored folders
+archive_unused/
+tests/
