@@ -2,6 +2,7 @@
 import json
 import re
 from datetime import datetime
+from typing import Callable, Optional
 
 from openai import OpenAI
 
@@ -10,6 +11,7 @@ from core.schemas import InvoiceData
 
 # Initialize OpenAI client
 client = OpenAI(api_key=config.OPENAI_API_KEY)
+_token_logger: Optional[Callable[[str, int, str], None]] = None
 
 EDITABLE_FIELDS = [
     "date",
@@ -20,6 +22,48 @@ EDITABLE_FIELDS = [
     "invoice_type",
     "consumption_category",
 ]
+
+
+def set_token_logger(logger: Optional[Callable[[str, int, str], None]]):
+    global _token_logger
+    _token_logger = logger
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _extract_total_tokens(usage) -> int:
+    if usage is None:
+        return 0
+
+    if isinstance(usage, dict):
+        total = usage.get("total_tokens")
+        if total is not None:
+            return max(0, _safe_int(total))
+        prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+        completion_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
+        return max(0, _safe_int(prompt_tokens) + _safe_int(completion_tokens))
+
+    total = getattr(usage, "total_tokens", None)
+    if total is not None:
+        return max(0, _safe_int(total))
+
+    prompt_tokens = getattr(usage, "prompt_tokens", getattr(usage, "input_tokens", 0))
+    completion_tokens = getattr(usage, "completion_tokens", getattr(usage, "output_tokens", 0))
+    return max(0, _safe_int(prompt_tokens) + _safe_int(completion_tokens))
+
+
+def _emit_token_log(action: str, token: int, details: str = ""):
+    if _token_logger is None:
+        return
+    try:
+        _token_logger(action, max(0, _safe_int(token)), details)
+    except Exception as e:
+        print(f"Error logging token usage: {e}")
 
 
 def _sanitize_invoice_payload(data: dict) -> dict:
@@ -67,7 +111,7 @@ def _normalize_manual_data(data: dict) -> dict:
     return out
 
 
-def parse_manual_record_text(user_text: str, current_data: dict | None = None) -> dict:
+def parse_manual_record_text(user_text: str, current_data: dict | None = None, trace_id: str = "") -> dict:
     """
     Parse free-form bookkeeping text into manual record fields.
     Fields: date, receipt_type, item_name, category, amount
@@ -136,12 +180,15 @@ def parse_manual_record_text(user_text: str, current_data: dict | None = None) -
                 },
             },
         )
+        used_tokens = _extract_total_tokens(getattr(completion, "usage", None))
+        _emit_token_log("LLM_MANUAL_PARSE", used_tokens, f"trace={trace_id or 'UNKNOWN'}")
         raw = completion.choices[0].message.content
         data = json.loads(raw) if isinstance(raw, str) else {}
         if not isinstance(data, dict):
             raise ValueError("invalid json content")
         return _normalize_manual_data({**base, **data})
     except Exception as e:
+        _emit_token_log("LLM_MANUAL_PARSE", 0, f"trace={trace_id or 'UNKNOWN'};status=error;error={type(e).__name__}")
         print(f"Error parsing manual record with OpenAI: {e}")
         return _parse_manual_record_fallback(base, user_text)
 
@@ -316,7 +363,7 @@ def _quality_score(data: InvoiceData) -> int:
     return score
 
 
-def _parse_invoice_once(base64_image: str, prompt: str, extra_context: str = "") -> InvoiceData:
+def _parse_invoice_once(base64_image: str, prompt: str, extra_context: str = "") -> tuple[InvoiceData, int]:
     content = [{"type": "text", "text": prompt}]
     if extra_context:
         content.append({"type": "text", "text": extra_context})
@@ -334,10 +381,11 @@ def _parse_invoice_once(base64_image: str, prompt: str, extra_context: str = "")
         messages=[{"role": "user", "content": content}],
         response_format=InvoiceData,
     )
-    return completion.choices[0].message.parsed
+    used_tokens = _extract_total_tokens(getattr(completion, "usage", None))
+    return completion.choices[0].message.parsed, used_tokens
 
 
-def extract_invoice_data(image_bytes: bytes) -> InvoiceData:
+def extract_invoice_data(image_bytes: bytes, trace_id: str = "") -> InvoiceData:
     """
     Extract structured invoice fields from image bytes.
     """
@@ -359,11 +407,14 @@ def extract_invoice_data(image_bytes: bytes) -> InvoiceData:
     9. If there are multiple 8-digit numbers, choose the nearest one after label "賣方" for vendor_tax_id and after label "買方" for buyer_tax_id.
     10. Return conservative values; do not hallucinate numbers not visible in the image.
     """
+    total_tokens = 0
 
     try:
-        first = _parse_invoice_once(base64_image, prompt)
+        first, first_tokens = _parse_invoice_once(base64_image, prompt)
+        total_tokens += first_tokens
         first_issues = _extract_quality_issues(first)
         if not first_issues:
+            _emit_token_log("LLM_INVOICE_EXTRACT", total_tokens, f"trace={trace_id or 'UNKNOWN'};passes=1")
             return first
 
         retry_hint = (
@@ -373,14 +424,21 @@ def extract_invoice_data(image_bytes: bytes) -> InvoiceData:
             "Please re-read the image and correct likely mistakes.\n"
             "Focus on labels near tax IDs and amount keywords."
         )
-        second = _parse_invoice_once(base64_image, prompt, retry_hint)
+        second, second_tokens = _parse_invoice_once(base64_image, prompt, retry_hint)
+        total_tokens += second_tokens
 
         # Keep the better candidate after automatic validation.
+        _emit_token_log("LLM_INVOICE_EXTRACT", total_tokens, f"trace={trace_id or 'UNKNOWN'};passes=2")
         if _quality_score(second) >= _quality_score(first):
             return second
         return first
 
     except Exception as e:
+        _emit_token_log(
+            "LLM_INVOICE_EXTRACT",
+            total_tokens,
+            f"trace={trace_id or 'UNKNOWN'};status=error;error={type(e).__name__}",
+        )
         print(f"Error processing image with OpenAI: {e}")
         return InvoiceData(
             date="1970-01-01",
@@ -393,7 +451,7 @@ def extract_invoice_data(image_bytes: bytes) -> InvoiceData:
         )
 
 
-def apply_user_edit(current_data: dict, user_text: str) -> InvoiceData:
+def apply_user_edit(current_data: dict, user_text: str, trace_id: str = "") -> InvoiceData:
     """
     Update any editable invoice fields from free-form user text.
     Only fields explicitly mentioned in user_text should be changed.
@@ -440,10 +498,13 @@ def apply_user_edit(current_data: dict, user_text: str) -> InvoiceData:
             ],
             response_format=InvoiceData,
         )
+        used_tokens = _extract_total_tokens(getattr(completion, "usage", None))
+        _emit_token_log("LLM_APPLY_EDIT", used_tokens, f"trace={trace_id or 'UNKNOWN'}")
         parsed = completion.choices[0].message.parsed
         normalized = _normalize_after_edit(parsed.model_dump(), user_text)
         return InvoiceData(**normalized)
     except Exception as e:
+        _emit_token_log("LLM_APPLY_EDIT", 0, f"trace={trace_id or 'UNKNOWN'};status=error;error={type(e).__name__}")
         print(f"Error applying user edit with OpenAI: {e}")
         return _apply_user_edit_fallback(clean_current, user_text)
 

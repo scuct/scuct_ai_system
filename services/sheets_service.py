@@ -46,6 +46,8 @@ SUBSIDIES_HEADERS = [
     "核銷明細",
 ]
 
+LOG_HEADERS = ["Timestamp", "Action", "Details", "Token"]
+
 
 def get_gspread_client():
     if SERVICE_ACCOUNT_JSON_STR:
@@ -100,15 +102,32 @@ class SheetsService:
         if not self.states_sheet.row_values(1):
             self.states_sheet.append_row(["LINE ID", "Current State", "Temp JSON"])
 
-        if not self.log_sheet.row_values(1):
-            self.log_sheet.append_row(["Timestamp", "Action", "Details"])
+        log_header_row = self.log_sheet.row_values(1)
+        if not log_header_row:
+            self.log_sheet.append_row(LOG_HEADERS)
+        elif log_header_row[: len(LOG_HEADERS)] != LOG_HEADERS:
+            self.log_sheet.update("A1:D1", [LOG_HEADERS])
 
     def get_taiwan_time(self):
         tw_timezone = timezone(timedelta(hours=8))
         return datetime.now(tw_timezone)
 
-    def log_action(self, action: str, details: str):
-        self.log_sheet.append_row([self.get_taiwan_time().isoformat(), action, details])
+    def log_action(self, action: str, details: str, token: Optional[int] = None):
+        token_value = ""
+        if token is not None:
+            try:
+                token_value = int(token)
+            except Exception:
+                token_value = str(token)
+        self.log_sheet.append_row([self.get_taiwan_time().isoformat(), action, details, token_value])
+
+    def log_token_usage(self, action: str, token: int, details: str = ""):
+        safe_token = 0
+        try:
+            safe_token = max(0, int(token))
+        except Exception:
+            safe_token = 0
+        self.log_action(action=action, details=details, token=safe_token)
 
     # --- State Management ---
     def get_user_state(self, line_id: str) -> UserState:

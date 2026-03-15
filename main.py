@@ -8,7 +8,12 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageCo
 
 from config import config
 from services.sheets_service import SheetsService
-from services.llm_service import extract_invoice_data, apply_user_edit, parse_manual_record_text
+from services.llm_service import (
+    extract_invoice_data,
+    apply_user_edit,
+    parse_manual_record_text,
+    set_token_logger,
+)
 from services.line_service import LineService
 from core.state_manager import StateManager, AppState
 from core.schemas import InvoiceData
@@ -56,6 +61,7 @@ def get_services():
     global _sheets_service, _line_service, _state_manager
     if _sheets_service is None:
         _sheets_service = SheetsService()
+        set_token_logger(_sheets_service.log_token_usage)
         _line_service = LineService()
         _state_manager = StateManager(_sheets_service)
     return _sheets_service, _line_service, _state_manager
@@ -180,7 +186,8 @@ def _apply_edit_and_reply(user_id: str, reply_token: str, text: str):
         line_service.reply_text(reply_token, "目前沒有可修改資料，請先上傳一張發票圖片。")
         return
 
-    updated_invoice = apply_user_edit(temp_data, text)
+    trace_id = f"{user_id}:{reply_token}"
+    updated_invoice = apply_user_edit(temp_data, text, trace_id=trace_id)
     merged_data = _preserve_meta_fields(temp_data, updated_invoice)
 
     state_manager.set_state(user_id, AppState.WAITING_FOR_CONFIRM, merged_data)
@@ -194,7 +201,8 @@ def _apply_manual_parse_and_reply(user_id: str, reply_token: str, text: str):
     if not _is_manual_mode(temp_data):
         temp_data = _default_manual_record()
 
-    parsed = parse_manual_record_text(text, temp_data)
+    trace_id = f"{user_id}:{reply_token}"
+    parsed = parse_manual_record_text(text, temp_data, trace_id=trace_id)
     parsed["_mode"] = "manual_bookkeeping"
 
     changed = []
@@ -369,7 +377,8 @@ def handle_image_message(event: MessageEvent):
         line_service.reply_text(reply_token, f"{display_name} 你好，已接收到照片，正在處理中。")
 
         image_content = line_service.get_message_content(message_id)
-        invoice_data = extract_invoice_data(image_content)
+        trace_id = f"{user_id}:{message_id}"
+        invoice_data = extract_invoice_data(image_content, trace_id=trace_id)
 
         if not _looks_like_invoice_data(invoice_data):
             line_service.push_text(
