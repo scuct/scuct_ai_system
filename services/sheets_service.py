@@ -46,7 +46,8 @@ SUBSIDIES_HEADERS = [
     "核銷明細",
 ]
 
-LOG_HEADERS = ["Timestamp", "Action", "Details", "Token"]
+LOG_HEADERS = ["Timestamp", "Action", "User", "Details", "Token"]
+LOG_HEADERS_V1 = ["Timestamp", "Action", "Details", "Token"]
 STATES_HEADERS = ["LINE ID", "User Name", "Current State", "Temp JSON", "Last used"]
 STATES_HEADERS_V1 = ["LINE ID", "Current State", "Temp JSON"]
 
@@ -114,7 +115,10 @@ class SheetsService:
         if not log_header_row:
             self.log_sheet.append_row(LOG_HEADERS)
         elif log_header_row[: len(LOG_HEADERS)] != LOG_HEADERS:
-            self.log_sheet.update("A1:D1", [LOG_HEADERS])
+            if log_header_row[: len(LOG_HEADERS_V1)] == LOG_HEADERS_V1:
+                self._migrate_log_sheet_v1_to_v2()
+            else:
+                self.log_sheet.update("A1:E1", [LOG_HEADERS])
 
     def _migrate_states_sheet_v1_to_v2(self):
         values = self.states_sheet.get_all_values()
@@ -132,18 +136,46 @@ class SheetsService:
         end_row = len(migrated_rows)
         self.states_sheet.update(f"A1:E{end_row}", migrated_rows)
 
+    def _migrate_log_sheet_v1_to_v2(self):
+        values = self.log_sheet.get_all_values()
+        if not values:
+            self.log_sheet.update("A1:E1", [LOG_HEADERS])
+            return
+
+        migrated_rows = [LOG_HEADERS]
+        for row in values[1:]:
+            timestamp = row[0] if len(row) > 0 else ""
+            action = row[1] if len(row) > 1 else ""
+            details = row[2] if len(row) > 2 else ""
+            token = row[3] if len(row) > 3 else ""
+            migrated_rows.append([timestamp, action, "", details, token])
+
+        end_row = len(migrated_rows)
+        self.log_sheet.update(f"A1:E{end_row}", migrated_rows)
+
     def get_taiwan_time(self):
         tw_timezone = timezone(timedelta(hours=8))
         return datetime.now(tw_timezone)
 
-    def log_action(self, action: str, details: str, token: Optional[int] = None):
+    def _extract_user_from_details(self, details: str) -> str:
+        text = str(details or "")
+        m = re.search(r"trace=([^;]+)", text)
+        if not m:
+            return ""
+        trace = m.group(1).strip()
+        if not trace or trace.upper() == "UNKNOWN":
+            return ""
+        return trace.split(":", 1)[0].strip()
+
+    def log_action(self, action: str, details: str, token: Optional[int] = None, user: str = ""):
         token_value = ""
         if token is not None:
             try:
                 token_value = int(token)
             except Exception:
                 token_value = str(token)
-        self.log_sheet.append_row([self.get_taiwan_time().isoformat(), action, details, token_value])
+        user_value = (user or self._extract_user_from_details(details) or "").strip()
+        self.log_sheet.append_row([self.get_taiwan_time().isoformat(), action, user_value, details, token_value])
 
     def log_token_usage(self, action: str, token: int, details: str = ""):
         safe_token = 0
@@ -151,7 +183,12 @@ class SheetsService:
             safe_token = max(0, int(token))
         except Exception:
             safe_token = 0
-        self.log_action(action=action, details=details, token=safe_token)
+        self.log_action(
+            action=action,
+            details=details,
+            token=safe_token,
+            user=self._extract_user_from_details(details),
+        )
 
     # --- State Management ---
     def user_exists(self, line_id: str) -> bool:
@@ -292,6 +329,7 @@ class SheetsService:
         self.log_action(
             "SAVE_INVOICE",
             f"Saved {inv_id}. eligibility={eligibility}, matched_activity={matched_activity_id or 'NONE'}",
+            user=user_id,
         )
 
         return {
@@ -341,7 +379,7 @@ class SheetsService:
         ]
 
         self.invoices_sheet.append_row(row)
-        self.log_action("SAVE_MANUAL_RECORD", f"Saved {inv_id} by {display_name or user_id}")
+        self.log_action("SAVE_MANUAL_RECORD", f"Saved {inv_id} by {display_name or user_id}", user=user_id)
 
         return {
             "invoice_id": inv_id,
