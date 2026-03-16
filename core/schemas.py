@@ -27,8 +27,16 @@ class ValidationResult(BaseModel):
 
 class UserState(BaseModel):
     line_id: str
+    user_name: str = "Unknown"
     state: Literal["NORMAL", "WAITING_FOR_INFO", "WAITING_FOR_CONFIRM"] = "NORMAL"
     temp_data: Optional[str] = None  # JSON string of current processing data
+    last_used: Optional[str] = None
 
     def to_row(self) -> List[str]:
-        return [self.line_id, self.state, self.temp_data or ""]
+        return [
+            self.line_id,
+            self.user_name,
+            self.state,
+            self.temp_data or "",
+            self.last_used or "",
+        ]

@@ -89,6 +89,31 @@ def handle_image_message_sync(event: MessageEvent):
             traceback.print_exc(file=f)
 
 
+@handler.add(MessageEvent)
+def handle_any_message_sync(event: MessageEvent):
+    if isinstance(event.message, (TextMessageContent, ImageMessageContent)):
+        return
+
+    try:
+        _, line_service, state_manager = get_services()
+        user_id = getattr(event.source, "user_id", None)
+        if not user_id:
+            return
+
+        try:
+            profile = line_service.messaging_api.get_profile(user_id)
+            display_name = profile.display_name or "Unknown"
+        except Exception:
+            display_name = "Unknown"
+
+        state_manager.touch_user(user_id, display_name)
+    except Exception:
+        import traceback
+
+        with open("debug_error.log", "a", encoding="utf-8") as f:
+            traceback.print_exc(file=f)
+
+
 def _is_token(text: str, token_set: set[str]) -> bool:
     return text.strip().lower() in {t.lower() for t in token_set}
 
@@ -240,6 +265,8 @@ def handle_text_message(event: MessageEvent):
     except Exception:
         display_name = "Unknown"
 
+    state_manager.touch_user(user_id, display_name)
+
     # cancel works globally
     if _is_token(text, CANCEL_TOKENS):
         state_manager.clear_state(user_id)
@@ -374,14 +401,15 @@ def handle_image_message(event: MessageEvent):
     message_id = event.message.id
     reply_token = event.reply_token
 
-    state_manager.clear_state(user_id)
-
     try:
         try:
             profile = line_service.messaging_api.get_profile(user_id)
             display_name = profile.display_name or "同學"
         except Exception:
             display_name = "同學"
+
+        state_manager.touch_user(user_id, display_name)
+        state_manager.clear_state(user_id, user_name=display_name)
 
         line_service.reply_text(reply_token, f"{display_name} 你好，已接收到照片，正在處理中。")
 

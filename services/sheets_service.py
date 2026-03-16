@@ -47,6 +47,8 @@ SUBSIDIES_HEADERS = [
 ]
 
 LOG_HEADERS = ["Timestamp", "Action", "Details", "Token"]
+STATES_HEADERS = ["LINE ID", "User Name", "Current State", "Temp JSON", "Last used"]
+STATES_HEADERS_V1 = ["LINE ID", "Current State", "Temp JSON"]
 
 
 def get_gspread_client():
@@ -99,14 +101,36 @@ class SheetsService:
         if not self.subsidies_sheet.row_values(1):
             self.subsidies_sheet.append_row(SUBSIDIES_HEADERS)
 
-        if not self.states_sheet.row_values(1):
-            self.states_sheet.append_row(["LINE ID", "Current State", "Temp JSON"])
+        states_header_row = self.states_sheet.row_values(1)
+        if not states_header_row:
+            self.states_sheet.append_row(STATES_HEADERS)
+        elif states_header_row[: len(STATES_HEADERS)] != STATES_HEADERS:
+            if states_header_row[: len(STATES_HEADERS_V1)] == STATES_HEADERS_V1:
+                self._migrate_states_sheet_v1_to_v2()
+            else:
+                self.states_sheet.update("A1:E1", [STATES_HEADERS])
 
         log_header_row = self.log_sheet.row_values(1)
         if not log_header_row:
             self.log_sheet.append_row(LOG_HEADERS)
         elif log_header_row[: len(LOG_HEADERS)] != LOG_HEADERS:
             self.log_sheet.update("A1:D1", [LOG_HEADERS])
+
+    def _migrate_states_sheet_v1_to_v2(self):
+        values = self.states_sheet.get_all_values()
+        if not values:
+            self.states_sheet.update("A1:E1", [STATES_HEADERS])
+            return
+
+        migrated_rows = [STATES_HEADERS]
+        for row in values[1:]:
+            line_id = row[0] if len(row) > 0 else ""
+            state = row[1] if len(row) > 1 else "NORMAL"
+            temp_json = row[2] if len(row) > 2 else ""
+            migrated_rows.append([line_id, "Unknown", state or "NORMAL", temp_json, ""])
+
+        end_row = len(migrated_rows)
+        self.states_sheet.update(f"A1:E{end_row}", migrated_rows)
 
     def get_taiwan_time(self):
         tw_timezone = timezone(timedelta(hours=8))
@@ -136,20 +160,32 @@ class SheetsService:
             return UserState(line_id=line_id)
 
         row_values = self.states_sheet.row_values(cell.row)
-        while len(row_values) < 3:
+        while len(row_values) < 5:
             row_values.append("")
+        header = self.states_sheet.row_values(1)
+        if header[: len(STATES_HEADERS)] == STATES_HEADERS:
+            return UserState(
+                line_id=row_values[0],
+                user_name=row_values[1] or "Unknown",
+                state=row_values[2] or "NORMAL",
+                temp_data=row_values[3] if row_values[3] else None,
+                last_used=row_values[4] if row_values[4] else None,
+            )
 
+        # Backward-compatible parsing for old 3-column layout.
         return UserState(
             line_id=row_values[0],
-            state=row_values[1],
+            user_name="Unknown",
+            state=row_values[1] or "NORMAL",
             temp_data=row_values[2] if row_values[2] else None,
+            last_used=None,
         )
 
     def set_user_state(self, state: UserState):
         cell = self.states_sheet.find(state.line_id, in_column=1)
         if cell:
             row_idx = cell.row
-            self.states_sheet.update(f"A{row_idx}:C{row_idx}", [state.to_row()])
+            self.states_sheet.update(f"A{row_idx}:E{row_idx}", [state.to_row()])
         else:
             self.states_sheet.append_row(state.to_row())
 

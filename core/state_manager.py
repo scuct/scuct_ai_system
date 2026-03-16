@@ -1,6 +1,6 @@
 import json
 from enum import Enum
-from core.schemas import UserState, InvoiceData
+from core.schemas import UserState
 
 # Enum for states to prevent typos
 class AppState(str, Enum):
@@ -16,18 +16,38 @@ class StateManager:
         """Fetch user state from Sheets"""
         return self.sheets.get_user_state(line_id)
         
-    def set_state(self, line_id: str, state: AppState, temp_data: dict = None):
+    def _now_iso(self) -> str:
+        return self.sheets.get_taiwan_time().isoformat()
+
+    def set_state(self, line_id: str, state: AppState, temp_data: dict = None, user_name: str = None):
         """Save user state to Sheets"""
+        current = self.get_state(line_id)
+        resolved_user_name = (user_name or current.user_name or "Unknown").strip() or "Unknown"
         user_state = UserState(
             line_id=line_id,
+            user_name=resolved_user_name,
             state=state.value,
-            temp_data=json.dumps(temp_data, ensure_ascii=False) if temp_data else None
+            temp_data=json.dumps(temp_data, ensure_ascii=False) if temp_data else None,
+            last_used=self._now_iso(),
         )
         self.sheets.set_user_state(user_state)
         
-    def clear_state(self, line_id: str):
+    def clear_state(self, line_id: str, user_name: str = None):
         """Reset user state to NORMAL"""
-        self.set_state(line_id, AppState.NORMAL, None)
+        self.set_state(line_id, AppState.NORMAL, None, user_name=user_name)
+
+    def touch_user(self, line_id: str, user_name: str = None):
+        """Ensure user exists in States and refresh last-used timestamp."""
+        current = self.get_state(line_id)
+        resolved_user_name = (user_name or current.user_name or "Unknown").strip() or "Unknown"
+        touched = UserState(
+            line_id=line_id,
+            user_name=resolved_user_name,
+            state=current.state,
+            temp_data=current.temp_data,
+            last_used=self._now_iso(),
+        )
+        self.sheets.set_user_state(touched)
         
     def get_temp_data(self, line_id: str) -> dict:
         """Parse temp JSON data from state"""
